@@ -223,9 +223,9 @@ options:
 
 If you use this in academic work, please cite via Zenodo:
 
-> Vollmer, S.C. (2026). *bhaptics-http: HTTP REST bridge for bHaptics haptic hardware* [Software]. Zenodo. https://doi.org/XXXX/zenodo.XXXXXXX
+> MissCrispenCakes (2026). *bhaptics-http: HTTP REST bridge for bHaptics haptic hardware* [Software]. Zenodo. https://doi.org/10.5281/zenodo.19025338
 
-_(DOI will be updated after Zenodo deposit.)_
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19025338.svg)](https://doi.org/10.5281/zenodo.19025338)
 
 ---
 
