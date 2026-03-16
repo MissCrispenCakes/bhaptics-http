@@ -231,9 +231,9 @@ If you use this in academic work, please cite via Zenodo:
 
 ## Related
 
-- [bhaptics-python](https://github.com/bhaptics/bhaptics-python) — official Python SDK (this package wraps it)
+- [tact-python](https://github.com/bhaptics/tact-python) — official Python SDK (this package wraps it)
 - [bHaptics Developer Portal](https://developer.bhaptics.com/)
-- [VR Ecology Project](https://github.com/MissCrispenCakes/VR_ECOLOGY_PROJECT) — research context where this was first developed
+- [VR Ecology Project](https://ieeevr2026.headsetparties.com) — research context where this was first developed
 
 ---
 
