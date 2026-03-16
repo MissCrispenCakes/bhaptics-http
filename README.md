@@ -11,7 +11,7 @@ bHaptics hardware is controlled through **bHaptics Player** (a Windows desktop a
 | SDK | Works in | Raw dot patterns? |
 |-----|----------|------------------|
 | tact-js | Browser only (WASM) | No (needs Studio) |
-| bhaptics-python | Windows Python | Yes — but no HTTP |
+| tact-python | Windows Python | Yes — but no HTTP |
 | bHaptics REST API | Via Player | No raw dot control |
 
 **bhaptics-http fills the gap:** run it once on Windows alongside bHaptics Player, then call it from Node.js, WSL2, Docker, another machine — or any `curl` command.
