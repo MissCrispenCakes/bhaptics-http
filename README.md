@@ -2,7 +2,7 @@
 
 **HTTP REST bridge for bHaptics haptic hardware.**
 
-Wraps the [`bhaptics-python`](https://github.com/bhaptics/bhaptics-python) SDK in a lightweight [aiohttp](https://docs.aiohttp.org/) server, exposing a language-agnostic REST API so that **any language or environment** can drive bHaptics vests, arm bands, gloves, and other devices over plain HTTP.
+Wraps the bHaptics [`tact-python`](https://github.com/bhaptics/tact-python) SDK in a lightweight [aiohttp](https://docs.aiohttp.org/) server, exposing a language-agnostic REST API so that **any language or environment** can drive bHaptics vests, arm bands, gloves, and other devices over plain HTTP.
 
 ### Why?
 
