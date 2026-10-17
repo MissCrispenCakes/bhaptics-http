@@ -98,20 +98,44 @@ Play a named pattern registered in bHaptics Studio.
 }
 ```
 
-**Device type reference:**
+The sparse `motors` request format is unchanged. The bridge expands it to a
+zero-filled integer array before awaiting the SDK. For example, the request above
+sets slots 0 and 4 in a 40-element vest array; every other slot is zero.
+An empty or omitted `motors` list sends an all-zero array.
 
-| deviceType | Device |
-|-----------|--------|
-| 0 | TactSuit X16 / X40 (chest vest) |
-| 1 | Tactosy2 left arm |
-| 2 | Tactosy2 right arm |
-| 3 | TactVisor head |
-| 6 | Tactosy feet left |
-| 7 | Tactosy feet right |
-| 8 | TactGlove left |
-| 9 | TactGlove right |
+**Device layouts:**
 
-`intensity` range: `0`–`100`
+| deviceType | Default layout | Default motorCount |
+|-----------|----------------|--------------------|
+| 0 | TactSuit X40 (legacy vest layout) | 40 |
+| 1 / 2 | Tactosy arms, left / right | 6 |
+| 3 | TactVisor | 4 |
+| 4 / 5 | Tactosy hands, left / right | 3 |
+| 6 / 7 | Tactosy feet, left / right | 3 |
+| 8 / 9 | TactGlove, left / right | 8 |
+
+Device position alone does not identify the hardware generation. Set optional
+`motorCount` to the SDK layout size for your model, e.g. `32` for TactSuit Pro
+or `3` for TactSleeve. This selects the array length; it does **not** remap motor
+positions. Consult the manufacturer's [motor index guide](https://docs.bhaptics.com/sdk/further/motor)
+for your model, particularly reduced-motor vests such as X16/Air. Defaults retain
+the original X40/Tactosy focus; hardware-specific mapping must be checked on-device.
+
+Validation runs before checking the Player connection:
+
+- `deviceType`: integer `0`–`9`, default `0`.
+- `duration`: integer milliseconds `1`–`2147483647`, default `100`.
+  The SDK recommends at least 100 ms; shorter positive values remain accepted.
+- `motorCount`: integer `1`–`40`, defaults from the table. The caller must select
+  the layout appropriate to the hardware.
+- `motors`: list of objects with integer `index` (`0` through `motorCount - 1`)
+  and integer `intensity` (`0`–`100`). Indices must be unique.
+
+Booleans, numeric strings, fractional numbers, missing motor fields, and values
+outside these ranges return HTTP `400` with a JSON `error`. A failed Player
+reconnection returns `503`; SDK exceptions or a playback result of `-1` return
+`500`. A successful response remains `{"ok": true}` and confirms software dispatch,
+not that a physical device actuated.
 
 ---
 
@@ -217,6 +241,46 @@ options:
   --app-id ID       bHaptics appId
   --api-key KEY     bHaptics apiKey
 ```
+
+---
+
+## Development and verification
+
+```bash
+pip install -e ".[dev]"
+python -m pytest -q
+```
+
+For hardware-independent tests on a host without the native SDK:
+
+```bash
+pip install aiohttp pytest pytest-asyncio
+python -m pytest -q
+```
+
+Tests replace `bhaptics_python` with a mocked SDK and exercise real local HTTP
+requests. They cover sparse conversion, layouts, validation, awaited calls,
+SDK failures, reconnect, and application cleanup. Runtime warnings fail the tests.
+
+Interface verification used the installed `bhaptics-python 0.2.2` CPython 3.12
+Linux wheel. Its native functions return awaitable `asyncio.Future` objects,
+although `inspect.iscoroutinefunction()` returns false. Passing motor dictionaries
+to `play_dot` raises `TypeError`; an integer list passes native argument conversion.
+The call signatures include `retry_initialize(app_id, api_key)`. See also the
+[upstream example](https://github.com/bhaptics/tact-python/blob/main/python_test.py)
+and [SDK reference](https://docs.bhaptics.com/sdk/python/references).
+The minimum dependency version 0.2.0 was not runtime-tested.
+
+All SDK operations run on the application's event loop. Library callers using
+`init_bhaptics` directly must now use `await init_bhaptics(app_id, api_key)`.
+`make_app()` remains synchronous; it awaits initialization on startup, cancels
+its reconnect task on cleanup, and awaits SDK `close()`.
+
+Physical verification still requires the target Windows host, bHaptics Player,
+and the intended devices: check `/health` with Player running and stopped; pulse
+the first and last valid slot at low intensity for each selected layout; verify
+zero-filled slots, event playback, stop, and reconnection after restarting Player.
+No physical device actuation or Windows integration was verified in these tests.
 
 ---
 
