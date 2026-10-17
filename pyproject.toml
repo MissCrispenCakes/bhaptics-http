@@ -55,7 +55,12 @@ packages = ["src/bhaptics_http"]
 include = [
     "src/",
     "examples/",
+    "tests/",
     "README.md",
     "LICENSE",
     "pyproject.toml",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+filterwarnings = ["error::RuntimeWarning"]

@@ -38,6 +38,7 @@ REST endpoints:
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import json
 import logging
 import os
@@ -101,23 +102,23 @@ def load_config(config_path: Optional[Path] = None) -> tuple[str, str]:
 
 # ── SDK connection helpers ────────────────────────────────────────────────────
 
-def _is_connected() -> bool:
+async def _is_connected() -> bool:
     try:
-        return bool(bh.is_connected())
+        return bool(await bh.is_connected())
     except Exception:
         return False
 
 
-def _try_reconnect() -> bool:
+async def _try_reconnect() -> bool:
     """Attempt reconnect; returns True on success."""
     global _app_id, _api_key
     try:
-        bh.retry_initialize()
-        if _is_connected():
+        await bh.retry_initialize(_app_id, _api_key)
+        if await _is_connected():
             log.info("[OK] Reconnected via retry_initialize()")
             return True
-        bh.registry_and_initialize(_app_id, _api_key, "BHapticsHTTP")
-        ok = _is_connected()
+        await bh.registry_and_initialize(_app_id, _api_key, "")
+        ok = await _is_connected()
         if ok:
             log.info("[OK] Reconnected via re-auth")
         return ok
@@ -126,13 +127,13 @@ def _try_reconnect() -> bool:
         return False
 
 
-def init_bhaptics(app_id: str, api_key: str) -> bool:
+async def init_bhaptics(app_id: str, api_key: str) -> bool:
     """Initialise the SDK; returns True if connected."""
     global _app_id, _api_key
     _app_id, _api_key = app_id, api_key
     try:
-        bh.registry_and_initialize(app_id, api_key, "BHapticsHTTP")
-        if _is_connected():
+        await bh.registry_and_initialize(app_id, api_key, "")
+        if await _is_connected():
             log.info(f"[OK] bhaptics-python connected (appId={app_id})")
             return True
         log.warning("[WARN] Initialised but not yet connected — is bHaptics Player running?")
@@ -148,16 +149,52 @@ async def reconnect_loop() -> None:
     while True:
         await asyncio.sleep(RECONNECT_INTERVAL)
         try:
-            connected = _is_connected()
+            connected = await _is_connected()
             if not connected:
                 msg = "Lost connection" if was_connected else "Not connected"
                 log.info(f"[...] {msg} — attempting reconnect")
-                _try_reconnect()
-                was_connected = _is_connected()
+                await _try_reconnect()
+                was_connected = await _is_connected()
             else:
                 was_connected = True
         except Exception as exc:
             log.error(f"[ERROR] reconnect_loop: {exc}")
+
+
+# Default layouts: original X40 vest and Tactosy arms, current visor and accessories.
+# Older/newer models sharing a position can override motorCount.
+MOTOR_COUNTS = {0: 40, 1: 6, 2: 6, 3: 4, 4: 3, 5: 3, 6: 3, 7: 3, 8: 8, 9: 8}
+
+
+def _integer(value, name: str, minimum: int, maximum: int) -> int:
+    # bool is an int subclass, but is not a valid JSON motor value.
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ValueError(f"'{name}' must be an integer from {minimum} to {maximum}")
+    return value
+
+
+def _dot_values(body) -> tuple[int, int, list[int]]:
+    if not isinstance(body, dict):
+        raise ValueError("JSON body must be an object")
+    device_type = _integer(body.get("deviceType", 0), "deviceType", 0, 9)
+    # Bound native signed 32-bit millisecond input without imposing a new time cap.
+    duration = _integer(body.get("duration", 100), "duration", 1, 2**31 - 1)
+    count = _integer(body.get("motorCount", MOTOR_COUNTS[device_type]), "motorCount", 1, 40)
+    motors = body.get("motors", [])
+    if not isinstance(motors, list):
+        raise ValueError("'motors' must be a list of index/intensity objects")
+    values = [0] * count
+    seen = set()
+    for motor in motors:
+        if not isinstance(motor, dict):
+            raise ValueError("Each motor must be an index/intensity object")
+        index = _integer(motor.get("index"), "index", 0, count - 1)
+        intensity = _integer(motor.get("intensity"), "intensity", 0, 100)
+        if index in seen:
+            raise ValueError(f"Duplicate motor index: {index}")
+        seen.add(index)
+        values[index] = intensity
+    return device_type, duration, values
 
 
 # ── Route handlers ────────────────────────────────────────────────────────────
@@ -169,12 +206,11 @@ async def handle_health(request: web.Request) -> web.Response:
     Response:
         {"ok": bool, "backend": "bhaptics-python", "player": bool|null}
     """
-    connected = _is_connected()
+    connected = await _is_connected()
     player = None
     if hasattr(bh, "is_bhaptics_player_running"):
         try:
-            result = bh.is_bhaptics_player_running()
-            player = bool(await result) if asyncio.isfuture(result) else bool(result)
+            player = bool(await bh.is_bhaptics_player_running())
         except Exception:
             player = None
     return web.json_response({"ok": connected, "backend": "bhaptics-python", "player": player})
@@ -197,18 +233,23 @@ async def handle_haptic(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "Invalid JSON"}, status=400)
 
+    if not isinstance(body, dict):
+        return web.json_response({"error": "JSON body must be an object"}, status=400)
+
     event = body.get("event")
     if not event or not isinstance(event, str):
         return web.json_response({"error": "Missing or invalid 'event' key"}, status=400)
 
-    if not _is_connected():
+    if not await _is_connected():
         log.warning(f"[WARN] Not connected — reconnecting before play_event '{event}'")
-        if not _try_reconnect():
+        if not await _try_reconnect():
             return web.json_response({"error": "Not connected to bHaptics Player"}, status=503)
 
     try:
         device_index = int(body.get("deviceIndex", 0))
-        bh.play_event(event, device_index)
+        result = await bh.play_event(event, device_index)
+        if result == -1:
+            raise RuntimeError("SDK rejected play_event")
         log.info(f"[>] play_event: {event}")
         return web.json_response({"ok": True, "event": event})
     except Exception as exc:
@@ -227,21 +268,15 @@ async def handle_haptic_dot(request: web.Request) -> web.Response:
         {
             "deviceType": 0,        // 0=vest, 1=left arm, 2=right arm, ...
             "duration":   100,      // milliseconds
-            "motors": [             // one entry per motor slot
+            "motors": [             // sparse motor entries; omitted slots are zero
                 {"index": 0, "intensity": 100},
                 {"index": 4, "intensity": 50}
             ]
         }
 
-    Device type reference (bHaptics TactSuit family):
-        0  = TactSuit X16/X40 (chest vest)
-        1  = Tactosy2 left arm
-        2  = Tactosy2 right arm
-        3  = TactVisor head
-        6  = Tactosy feet left
-        7  = Tactosy feet right
-        8  = TactGlove left
-        9  = TactGlove right
+    deviceType selects SDK position 0–9. Defaults are the legacy X40/Tactosy
+    layouts; optional motorCount (1–40) selects another model's array length.
+    See README for layout counts and motor indexing requirements.
 
     Response:
         {"ok": true}
@@ -251,16 +286,20 @@ async def handle_haptic_dot(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "Invalid JSON"}, status=400)
 
-    if not _is_connected():
+    try:
+        device_type, duration, motors = _dot_values(body)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    if not await _is_connected():
         log.warning("[WARN] Not connected — reconnecting before play_dot")
-        if not _try_reconnect():
+        if not await _try_reconnect():
             return web.json_response({"error": "Not connected to bHaptics Player"}, status=503)
 
     try:
-        device_type = int(body.get("deviceType", 0))
-        duration    = int(body.get("duration",   100))
-        motors      = body.get("motors", [])
-        bh.play_dot(device_type, duration, motors)
+        result = await bh.play_dot(device_type, duration, motors)
+        if result == -1:
+            raise RuntimeError("SDK rejected play_dot")
         log.info(f"[>] play_dot device={device_type} duration={duration}ms motors={len(motors)}")
         return web.json_response({"ok": True})
     except Exception as exc:
@@ -278,7 +317,7 @@ async def handle_haptic_stop(request: web.Request) -> web.Response:
         {"ok": true}
     """
     try:
-        bh.stop_all()
+        await bh.stop_all()
         log.info("[>] stop_all")
         return web.json_response({"ok": True})
     except Exception as exc:
@@ -301,11 +340,21 @@ def make_app(
     reconnect loop.  Pass the returned app to ``aiohttp.web.run_app()``.
     """
     async def on_startup(app: web.Application) -> None:
-        init_bhaptics(app_id, api_key)
-        asyncio.ensure_future(reconnect_loop())
+        await init_bhaptics(app_id, api_key)
+
+    async def sdk_lifecycle(app: web.Application):
+        task = asyncio.create_task(reconnect_loop())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            await bh.close()
 
     app = web.Application()
     app.on_startup.append(on_startup)
+    app.cleanup_ctx.append(sdk_lifecycle)
     app.router.add_get( "/health",       handle_health)
     app.router.add_post("/haptic",       handle_haptic)
     app.router.add_post("/haptic/dot",   handle_haptic_dot)
