@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (not yet released)
+## 0.2.0 - 2026-11-03
 
 ### Fixed
 - The bridge keeps one session with Player. Starting it before Player, or restarting Player,

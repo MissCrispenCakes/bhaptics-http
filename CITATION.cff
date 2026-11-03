@@ -16,6 +16,7 @@ url: 'https://github.com/MissCrispenCakes/bhaptics-http'
 doi: 10.5281/zenodo.19025338
 license: MIT
 version: 0.2.0
+date-released: 2026-11-03
 abstract: >-
   HTTP REST bridge for bHaptics haptic hardware. Wraps the bhaptics-python SDK in a small aiohttp server so that any language can drive bHaptics vests, arm bands and gloves over plain HTTP, with raw per-motor control and no bHaptics Studio registration. Accepts motor values as a plain list of intensities or as sparse index/intensity entries, needs no bHaptics API key for haptics, reports which devices are connected (live with a key), and is documented against bHaptics' own SDK reference. Runs on the Windows machine where bHaptics Player runs.
 keywords:
