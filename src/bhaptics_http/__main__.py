@@ -1,3 +1,9 @@
+# bhaptics-http — HTTP REST bridge for bHaptics haptic hardware
+# Made by S.C. Vollmer · @MissCrispenCakes
+# SPDX-FileCopyrightText: 2026 S.C. Vollmer
+# SPDX-License-Identifier: MIT
+# See LICENSE for permissions and terms; CITATION.cff for citation metadata.
+
 """
 Entry point for:  python -m bhaptics_http
 
@@ -63,6 +69,7 @@ def main() -> None:
     print(f"bhaptics-http starting on {args.host}:{args.port}  (appId={app_id})")
     print("Endpoints:")
     print(f"  GET  http://{args.host}:{args.port}/health")
+    print(f"  GET  http://{args.host}:{args.port}/devices")
     print(f"  POST http://{args.host}:{args.port}/haptic")
     print(f"  POST http://{args.host}:{args.port}/haptic/dot")
     print(f"  POST http://{args.host}:{args.port}/haptic/stop")

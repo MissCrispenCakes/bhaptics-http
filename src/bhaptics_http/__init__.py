@@ -1,3 +1,9 @@
+# bhaptics-http — HTTP REST bridge for bHaptics haptic hardware
+# Made by S.C. Vollmer · @MissCrispenCakes
+# SPDX-FileCopyrightText: 2026 S.C. Vollmer
+# SPDX-License-Identifier: MIT
+# See LICENSE for permissions and terms; CITATION.cff for citation metadata.
+
 """
 bhaptics-http
 ~~~~~~~~~~~~~
@@ -21,8 +27,8 @@ Quick start:
          -d '{"deviceType":0,"duration":200,"motors":[{"index":0,"intensity":100}]}'
 """
 
-__version__ = "0.1.0"
-__author__  = "MissCrispenCakes"
+__version__ = "0.2.0"
+__author__  = "S.C. Vollmer"
 __license__ = "MIT"
 
 from bhaptics_http.server import make_app, load_config, init_bhaptics

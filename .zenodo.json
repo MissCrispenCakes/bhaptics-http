@@ -1,0 +1,35 @@
+{
+  "title": "bhaptics-http: HTTP REST bridge for bHaptics haptic hardware",
+  "description": "HTTP REST bridge for bHaptics haptic hardware. Wraps the bhaptics-python SDK in a small aiohttp server so that any language can drive bHaptics vests, arm bands and gloves over plain HTTP, with raw per-motor control and no bHaptics Studio registration. Accepts motor values as a plain list of intensities or as sparse index/intensity entries, needs no bHaptics API key for haptics, reports which devices are connected (live with a key), and is documented against bHaptics' own SDK reference. Runs on the Windows machine where bHaptics Player runs.",
+  "license": "MIT",
+  "upload_type": "software",
+  "access_right": "open",
+  "creators": [
+    {
+      "name": "Vollmer, S.C.",
+      "affiliation": "York University; KDF Entertainment Inc.",
+      "orcid": "0000-0002-3359-2810"
+    }
+  ],
+  "keywords": [
+    "haptics",
+    "bHaptics",
+    "REST API",
+    "bridge",
+    "TactSuit",
+    "wearable computing",
+    "tactile feedback",
+    "virtual reality",
+    "XR",
+    "WSL2",
+    "Python",
+    "aiohttp"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/MissCrispenCakes/bhaptics-http",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    }
+  ]
+}

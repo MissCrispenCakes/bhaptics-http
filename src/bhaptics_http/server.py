@@ -1,3 +1,9 @@
+# bhaptics-http — HTTP REST bridge for bHaptics haptic hardware
+# Made by S.C. Vollmer · @MissCrispenCakes
+# SPDX-FileCopyrightText: 2026 S.C. Vollmer
+# SPDX-License-Identifier: MIT
+# See LICENSE for permissions and terms; CITATION.cff for citation metadata.
+
 """
 bhaptics_http.server
 ~~~~~~~~~~~~~~~~~~~~
@@ -42,6 +48,7 @@ from contextlib import suppress
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -67,6 +74,22 @@ _api_key: Optional[str] = None
 
 RECONNECT_INTERVAL = 5  # seconds between liveness checks
 
+# Device watch (0.2.0). Player tells the SDK which devices are connected; the SDK keeps that
+# table but nothing reported it. The reconnect loop now reads it every RECONNECT_INTERVAL and
+# logs every change, and GET /devices serves the live table with name, status and battery.
+POSITION_NAMES = {0: "vest", 1: "left arm", 2: "right arm", 3: "visor", 4: "left hand",
+                  5: "right hand", 6: "left foot", 7: "right foot", 8: "left glove", 9: "right glove"}
+_devices: dict = {"received": False, "list": [], "connected": None}   # connected: set of positions, None = no list yet
+# Player 3.6.1 pushes its device table to an SDK client when a device CONNECTS and when the
+# client registers, but not when a device disconnects (checked 2026-10-26 with a registered app
+# id: a band switched off for 30 s produced nothing until it was switched on again, while
+# re-registering every 10 s showed the disconnect at the next tick). So the watcher re-registers
+# every DEVICE_POLL_S before reading the table. Each re-registration makes the SDK print its own
+# reconnect lines to the console; set BHAPTICS_HTTP_DEVICE_POLL_S=0 to stop re-registering
+# (then disconnects are only noticed when something else connects or the bridge restarts).
+DEVICE_POLL_S = float(os.environ.get("BHAPTICS_HTTP_DEVICE_POLL_S", "10"))
+_last_reregister = float("-inf")   # so the first call re-registers even just after boot
+
 # ── Config helpers ────────────────────────────────────────────────────────────
 
 def load_config(config_path: Optional[Path] = None) -> tuple[str, str]:
@@ -91,6 +114,9 @@ def load_config(config_path: Optional[Path] = None) -> tuple[str, str]:
         if config_path and config_path.exists():
             try:
                 cfg = json.loads(config_path.read_text())
+                if any(str(cfg.get(k, "")).startswith("YOUR_") for k in ("appId", "apiKey")):
+                    log.warning(f"[WARN] {config_path} still has the placeholder values; running without a key")
+                    cfg = {}
                 app_id  = app_id  or cfg.get("appId",  "BHapticsHTTP")
                 api_key = api_key or cfg.get("apiKey", "")
                 log.info(f"Loaded config from {config_path}")
@@ -109,28 +135,68 @@ async def _is_connected() -> bool:
         return False
 
 
-async def _try_reconnect() -> bool:
-    """Attempt reconnect; returns True on success."""
-    global _app_id, _api_key
+async def _player_running() -> Optional[bool]:
+    """Is the Player process up? None when this SDK cannot tell (then the bridge tries anyway)."""
+    if not hasattr(bh, "is_bhaptics_player_running"):
+        return None
     try:
-        await bh.retry_initialize(_app_id, _api_key)
-        if await _is_connected():
-            log.info("[OK] Reconnected via retry_initialize()")
-            return True
-        await bh.registry_and_initialize(_app_id, _api_key, "")
-        ok = await _is_connected()
-        if ok:
-            log.info("[OK] Reconnected via re-auth")
-        return ok
+        return bool(await bh.is_bhaptics_player_running())
+    except Exception:
+        return None
+
+
+# One SDK session at a time, and only the bridge reconnects. Each registration attempt made while
+# Player is down leaves a socket (and an SDK retry loop) waiting; when Player starts they all
+# connect in the same second, Player authenticates one, and every command on the others is
+# dropped ("message blocked - is_auth=false" in Player's log). Seen 2026-11-03: bridge started
+# before Player, and Player restarted mid-run; no buzz was felt and no disconnect was seen.
+_reconnect_lock = asyncio.Lock()
+_needs_fresh_session = False   # set after Player went away: register anew even if the SDK says connected
+
+
+def _mark_fresh(needed: bool) -> None:
+    global _needs_fresh_session
+    _needs_fresh_session = needed
+
+
+async def _close_session() -> None:
+    """Drop the SDK's sockets and stop its own reconnect loop."""
+    try:
+        await bh.close()
     except Exception as exc:
-        log.warning(f"[WARN] Reconnect failed: {exc}")
-        return False
+        log.debug(f"close failed: {exc}")
+
+
+async def _try_reconnect() -> bool:
+    """Close whatever the SDK has open and register once; returns True on success.
+    Does nothing while Player is not running."""
+    async with _reconnect_lock:
+        if await _is_connected() and not _needs_fresh_session:
+            return True                      # another caller reconnected while we waited
+        if await _player_running() is False:
+            return False
+        await _close_session()
+        try:
+            await bh.registry_and_initialize(_app_id, _api_key or "", "")
+            ok = await _is_connected()
+        except Exception as exc:
+            log.warning(f"[WARN] Reconnect failed: {exc}")
+            return False
+        if ok:
+            _mark_fresh(False)
+            log.info("[OK] Reconnected to bHaptics Player")
+        return ok
 
 
 async def init_bhaptics(app_id: str, api_key: str) -> bool:
-    """Initialise the SDK; returns True if connected."""
+    """Initialise the SDK; returns True if connected. If Player is not running yet, waits for
+    the reconnect loop instead of registering (see _reconnect_lock)."""
     global _app_id, _api_key
     _app_id, _api_key = app_id, api_key
+    if await _player_running() is False:
+        log.warning("[WAIT] bHaptics Player is not running — will connect when it starts")
+        _mark_fresh(True)
+        return False
     try:
         await bh.registry_and_initialize(app_id, api_key, "")
         if await _is_connected():
@@ -143,20 +209,117 @@ async def init_bhaptics(app_id: str, api_key: str) -> bool:
         return False
 
 
+async def _fetch_device_list() -> tuple[bool, list[dict]]:
+    """Player's device table via the SDK's get_device_info_json(). Returns (received, list).
+    received is False until Player has sent a list (the SDK returns "" before then, which with
+    an unregistered app id can take seconds to minutes), or if the SDK cannot provide one."""
+    if not hasattr(bh, "get_device_info_json"):
+        return False, []
+    try:
+        raw = await asyncio.wait_for(bh.get_device_info_json(), timeout=1.0)
+    except Exception:
+        return False, []
+    if not raw:
+        return False, []
+    try:
+        items = json.loads(raw) if isinstance(raw, str) else list(raw)
+    except Exception:
+        return False, []
+    out = []
+    for d in items:
+        if not isinstance(d, dict):
+            continue
+        pos = d.get("position")
+        try:
+            pos = int(pos)
+        except (TypeError, ValueError):
+            continue
+        out.append({
+            "position":  pos,
+            "name":      d.get("deviceName"),
+            "role":      POSITION_NAMES.get(pos, f"position {pos}"),
+            "connected": bool(d.get("connected")),
+            "status":    d.get("connectionStatus"),
+            "battery":   (d.get("battery") if isinstance(d.get("battery"), (int, float)) and d.get("battery") >= 0 else None),
+        })
+    return True, sorted(out, key=lambda x: x["position"])
+
+
+async def reregister_for_devices(force: bool = False) -> None:
+    """Ask Player for a fresh device table by re-registering the SDK session. Rate-limited to
+    DEVICE_POLL_S unless forced; a no-op when polling is disabled or the SDK lacks the call."""
+    global _last_reregister
+    if not hasattr(bh, "retry_initialize") or _app_id is None:
+        return
+    if not _api_key and not force:
+        return      # unregistered app id: Player answers "Cannot find the deployed workspace", no table
+    import time as _time
+    now = _time.monotonic()
+    if not force and (DEVICE_POLL_S <= 0 or now - _last_reregister < DEVICE_POLL_S):
+        return
+    _last_reregister = now
+    try:
+        await asyncio.wait_for(bh.retry_initialize(_app_id, _api_key or ""), timeout=2.0)
+        await asyncio.sleep(0.3)        # the table arrives just after the registration completes
+    except Exception as exc:
+        log.debug(f"[devices] re-register failed: {exc}")
+
+
+async def refresh_devices(force_reregister: bool = False) -> dict:
+    """Read Player's device table, remember it, and log every change in who is connected.
+    Re-registers first (see reregister_for_devices) so disconnections are seen too."""
+    if await _is_connected():
+        await reregister_for_devices(force=force_reregister)
+    received, items = await _fetch_device_list()
+    if not received:
+        return _devices
+    now = {d["position"] for d in items if d["connected"]}
+    prev = _devices["connected"]
+    byname = {d["position"]: d for d in items}
+    known  = {d["position"]: d for d in _devices["list"]}      # last table, for names Player drops
+    def _desc(p: int) -> str:
+        d = byname.get(p, {})
+        name = d.get("name") or known.get(p, {}).get("name") or "?"
+        batt = d.get("battery")
+        # Player reports -1 (and sometimes no name) for a device that has just gone.
+        batt_s = f", {batt} %" if isinstance(batt, (int, float)) and batt >= 0 else ""
+        return f"{POSITION_NAMES.get(p, p)} ({name}{batt_s})"
+    if prev is None:
+        names = ", ".join(_desc(p) for p in sorted(now)) or "none"
+        log.info(f"[devices] list received from Player — connected: {names}")
+    else:
+        for p in sorted(now - prev):
+            log.info(f"[devices] {_desc(p)} connected")
+        for p in sorted(prev - now):
+            log.info(f"[devices] {_desc(p)} disconnected")
+    _devices.update({"received": True, "list": items, "connected": now})
+    return _devices
+
+
 async def reconnect_loop() -> None:
-    """Background task: reconnect whenever the SDK loses the Player connection."""
+    """Background task: reconnect whenever the SDK loses the Player connection, and watch the
+    device table so connections and disconnections show in the console as they happen."""
     was_connected = False
+    player_gone = False
     while True:
         await asyncio.sleep(RECONNECT_INTERVAL)
         try:
-            connected = await _is_connected()
-            if not connected:
+            if await _player_running() is False:
+                if not player_gone:
+                    log.info("[...] bHaptics Player is not running — waiting for it")
+                    await _close_session()       # stop the SDK's own retries (see _reconnect_lock)
+                    player_gone = True
+                _mark_fresh(True)
+                was_connected = False
+                continue
+            player_gone = False
+            if _needs_fresh_session or not await _is_connected():
                 msg = "Lost connection" if was_connected else "Not connected"
                 log.info(f"[...] {msg} — attempting reconnect")
-                await _try_reconnect()
-                was_connected = await _is_connected()
+                was_connected = await _try_reconnect()
             else:
                 was_connected = True
+            await refresh_devices()
         except Exception as exc:
             log.error(f"[ERROR] reconnect_loop: {exc}")
 
@@ -182,7 +345,16 @@ def _dot_values(body) -> tuple[int, int, list[int]]:
     count = _integer(body.get("motorCount", MOTOR_COUNTS[device_type]), "motorCount", 1, 40)
     motors = body.get("motors", [])
     if not isinstance(motors, list):
-        raise ValueError("'motors' must be a list of index/intensity objects")
+        raise ValueError("'motors' must be a list of index/intensity objects or of intensities")
+    if motors and not any(isinstance(motor, dict) for motor in motors):
+        # A plain list of intensities, one per motor slot, as sent by clients that
+        # already hold a full array. It keeps its own length; no padding or trimming.
+        if len(motors) > 40:
+            raise ValueError("a plain 'motors' list can have at most 40 intensities")
+        values = [_integer(v, f"motors[{i}]", 0, 100) for i, v in enumerate(motors)]
+        if "motorCount" in body and count != len(values):
+            raise ValueError("'motorCount' must equal the length of a plain 'motors' list")
+        return device_type, duration, values
     values = [0] * count
     seen = set()
     for motor in motors:
@@ -214,6 +386,63 @@ async def handle_health(request: web.Request) -> web.Response:
         except Exception:
             player = None
     return web.json_response({"ok": connected, "backend": "bhaptics-python", "player": player})
+
+
+async def handle_devices(request: web.Request) -> web.Response:
+    """
+    GET /devices
+
+    Which devices bHaptics Player currently reports as connected, by SDK
+    position 0-9 (0 vest, 1/2 arms, 3 visor, 4/5 hands, 6/7 feet, 8/9 gloves).
+
+    Response:
+        {"ok": bool, "devices": {"0": bool, ..., "9": bool} | null, "present": [int, ...],
+         "list": [{"position", "name", "role", "connected", "status", "battery"}, ...],
+         "source": "player" | "flags", "pending": bool}
+
+    Read live from Player's device table on every call (source "player"). Until Player has sent
+    that table — with an unregistered app id that can take seconds to minutes — "pending" is
+    true and the per-position SDK flags are used instead (source "flags"), which can be stale.
+    "devices" is null if the installed SDK can report neither.
+
+    ?refresh=1 re-registers with Player first, regardless of the poll interval, so the answer
+    reflects a device switched off since the last tick.
+    """
+    connected = await _is_connected()
+    force = (request.query.get("refresh") or "").lower() in ("1", "true", "yes")
+    state = await refresh_devices(force_reregister=force)
+    if state["received"]:
+        items = state["list"]
+        present = sorted(state["connected"])
+        return web.json_response({
+            "ok": connected,
+            "devices": {str(p): (p in state["connected"]) for p in range(10)},
+            "present": present,
+            "list": items,
+            "source": "player",
+            "pending": False,
+        })
+
+    pending = hasattr(bh, "get_device_info_json")
+    if not hasattr(bh, "is_bhaptics_device_connected"):
+        return web.json_response({"ok": connected, "devices": None, "present": [], "list": [],
+                                  "source": "flags", "pending": pending})
+
+    async def one(position: int) -> bool:
+        try:
+            return bool(await asyncio.wait_for(bh.is_bhaptics_device_connected(position), timeout=1.0))
+        except Exception:
+            return False
+
+    states = await asyncio.gather(*(one(p) for p in range(10)))
+    return web.json_response({
+        "ok": connected,
+        "devices": {str(p): state_ for p, state_ in enumerate(states)},
+        "present": [p for p, state_ in enumerate(states) if state_],
+        "list": [],
+        "source": "flags",
+        "pending": pending,
+    })
 
 
 async def handle_haptic(request: web.Request) -> web.Response:
@@ -274,6 +503,9 @@ async def handle_haptic_dot(request: web.Request) -> web.Response:
             ]
         }
 
+    "motors" may instead be a plain list of integer intensities (0-100), one
+    per motor slot; it keeps its own length. The two forms cannot be mixed.
+
     deviceType selects SDK position 0–9. Defaults are the legacy X40/Tactosy
     layouts; optional motorCount (1–40) selects another model's array length.
     See README for layout counts and motor indexing requirements.
@@ -325,6 +557,38 @@ async def handle_haptic_stop(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=500)
 
 
+# ── Cross-origin reads ────────────────────────────────────────────────────────
+# Only the read-only GET routes can be read by a web page, and only by pages served
+# from this machine (the IEM demo runs on http://127.0.0.1:<port>). Add other origins
+# with BHAPTICS_HTTP_CORS_ORIGINS (comma separated). The POST routes are unchanged:
+# a page can still send them, but cannot read the reply.
+
+READ_ONLY_PATHS = {"/health", "/devices"}
+_LOCAL_ORIGIN = re.compile(r"^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$")
+
+
+def _origin_allowed(origin: str) -> bool:
+    extra = {o.strip() for o in os.environ.get("BHAPTICS_HTTP_CORS_ORIGINS", "").split(",") if o.strip()}
+    return bool(_LOCAL_ORIGIN.match(origin)) or origin in extra
+
+
+@web.middleware
+async def read_only_cors(request: web.Request, handler):
+    if request.path not in READ_ONLY_PATHS:
+        return await handler(request)
+    preflight = request.method == "OPTIONS"
+    response = web.Response(status=204) if preflight else await handler(request)
+    response.headers["Vary"] = "Origin"
+    origin = request.headers.get("Origin")
+    if origin and _origin_allowed(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        if preflight:
+            response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = request.headers.get("Access-Control-Request-Headers", "")
+            response.headers["Access-Control-Max-Age"] = "600"
+    return response
+
+
 # ── App factory ───────────────────────────────────────────────────────────────
 
 def make_app(
@@ -352,10 +616,11 @@ def make_app(
                 await task
             await bh.close()
 
-    app = web.Application()
+    app = web.Application(middlewares=[read_only_cors])
     app.on_startup.append(on_startup)
     app.cleanup_ctx.append(sdk_lifecycle)
     app.router.add_get( "/health",       handle_health)
+    app.router.add_get( "/devices",      handle_devices)
     app.router.add_post("/haptic",       handle_haptic)
     app.router.add_post("/haptic/dot",   handle_haptic_dot)
     app.router.add_post("/haptic/stop",  handle_haptic_stop)
