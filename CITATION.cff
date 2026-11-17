@@ -13,7 +13,7 @@ authors:
 repository-code: 'https://github.com/MissCrispenCakes/bhaptics-http'
 repository-artifact: 'https://pypi.org/project/bhaptics-http/'
 url: 'https://github.com/MissCrispenCakes/bhaptics-http'
-doi: 10.5281/zenodo.19025338
+doi: 10.5281/zenodo.23933720
 license: MIT
 version: 0.2.0
 date-released: 2026-11-03
